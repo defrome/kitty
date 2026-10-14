@@ -576,14 +576,22 @@ def schedule_redraw(os_window_id: int) -> None:
 last_rendered: dict[int, Any] = {}
 
 
+sidebar_signatures: dict[int, Any] = {}
+
+
 def refresh_all(boss: 'Boss') -> None:
-    ' Called periodically: redraws titlebars whose git or claude state changed '
-    for os_window_id in boss.os_window_map:
+    ' Called periodically: redraws titlebars and sidebars whose git or claude state changed '
+    from .sidebar import signature
+    for os_window_id, tm in boss.os_window_map.items():
         st = state_for_os_window(boss, os_window_id)
         key = st._replace(toast='')
         if last_rendered.get(os_window_id) != key:
             last_rendered[os_window_id] = key
             schedule_redraw(os_window_id)
+        sig = signature(os_window_id)
+        if sidebar_signatures.get(os_window_id) != sig:
+            sidebar_signatures[os_window_id] = sig
+            tm.mark_tab_bar_dirty()
 
 
 def start_refresh_timer(boss: 'Boss') -> None:

@@ -2069,6 +2069,12 @@ class TabManager:  # {{{
         self.recent_tab_bar_mouse_events.add(button, modifiers, action, x, y, tab_id_at_pointer)
         drag_started = get_tab_being_dragged()[1]
         is_left_release = button == GLFW_MOUSE_BUTTON_LEFT and action == GLFW_RELEASE
+        from .sidebar import ACTION_BASE, handle_click
+        if tab_id_at_pointer <= ACTION_BASE:  # a row of the sidebar that is not a tab
+            if is_left_release and not drag_started:
+                set_tab_being_dragged()
+                handle_click(self.tab_bar, tab_id_at_pointer)
+            return
         if tab_id_at_pointer < 0:  # synthetic tab (e.g. "+" new-tab button)
             if is_left_release and not drag_started:
                 set_tab_being_dragged()  # clear potential drag from a press on a tab

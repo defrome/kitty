@@ -1209,6 +1209,15 @@ class TabBar:
         self.tab_extents = ()
         s.cursor.x = s.cursor.y = 0
         s.erase_in_display(2, False)
+        if self.tab_bar_edge == LEFT_EDGE:
+            # On the left the tab bar is the sidebar listing workspaces
+            from .sidebar import render
+            try:
+                self.tab_extents = render(self)
+            except Exception:
+                import traceback
+                traceback.print_exc()
+            return self._update_edge_defaults(True)
         if not data:
             return self._update_edge_defaults(True)
         max_tab_length = max(1, s.columns - 1)

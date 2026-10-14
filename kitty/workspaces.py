@@ -207,13 +207,15 @@ def claude_resume_command(cmd: str | list[str], session_id: str) -> str | list[s
 
 
 def prune_claude_sessions() -> None:
-    ' Remove records left by kitty processes that are no longer running '
-    with suppress(OSError), os.scandir(claude_sessions_dir()) as entries:
-        for entry in entries:
-            pid = entry.name.partition('-')[0]
-            if pid.isdigit() and not os.path.exists(f'/proc/{pid}'):
-                with suppress(OSError):
-                    os.remove(entry.path)
+    ' Remove records of sessions and states left by kitty processes that are no longer running '
+    from .claude_status import status_dir
+    for d in (claude_sessions_dir(), status_dir()):
+        with suppress(OSError), os.scandir(d) as entries:
+            for entry in entries:
+                pid = entry.name.partition('-')[0]
+                if pid.isdigit() and not os.path.exists(f'/proc/{pid}'):
+                    with suppress(OSError):
+                        os.remove(entry.path)
 # }}}
 
 
