@@ -1617,6 +1617,11 @@ class Boss:
         finally:
             self._issue_next_thumbnail_request()
 
+    @ac('misc', 'Show the settings panel')
+    def settings(self) -> None:
+        from .workspaces import show_pixel_panel
+        show_pixel_panel(self, 'settings', {}, lambda result: None)
+
     @ac('misc', 'Show the Git menu for the project in the active window')
     def git_menu(self) -> None:
         from .titlebar import show_toast
@@ -1672,7 +1677,7 @@ class Boss:
             'launch --location=hsplit --cwd=current',     # split down
             'save_workspace',                             # save workspace
             'workspaces',                                 # workspace switcher
-            'edit_config_file',                           # settings
+            'settings',                                   # settings
             'git_menu',                                   # git
             'focus_claude',                               # claude
         )

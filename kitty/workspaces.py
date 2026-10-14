@@ -278,6 +278,7 @@ def replay_into_screen(screen: Any, path: str) -> None:
 def process_launch_lines(lines: Sequence[str], restorable: Sequence[str], name: str, windows: dict[int, 'Window']) -> Iterator[str]:
     ' Drop unsafe commands, make claude resume its session and save terminal contents '
     allowed = frozenset(restorable)
+    resume_claude = read_state().get('resume_claude', True)
     sdir = scrollback_dir(name)
     used_files: set[str] = set()
     for line in lines:
@@ -292,7 +293,7 @@ def process_launch_lines(lines: Sequence[str], restorable: Sequence[str], name: 
                             program = program_of(cmd)
                             if program not in allowed:
                                 del data['cmd_at_shell_startup']
-                            elif program == 'claude' and (sid := claude_session_for_window(data.get('id', 0))):
+                            elif program == 'claude' and resume_claude and (sid := claude_session_for_window(data.get('id', 0))):
                                 data['cmd_at_shell_startup'] = claude_resume_command(cmd, sid)
                             parts[i] = unserialize_launch_flag + json.dumps(data)
                         w = windows.get(data.get('id', 0))
