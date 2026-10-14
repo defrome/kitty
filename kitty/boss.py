@@ -1624,9 +1624,8 @@ class Boss:
 
     @ac('misc', 'Show the Git menu for the project in the active window')
     def git_menu(self) -> None:
-        from .titlebar import show_toast
-        if tm := self.active_tab_manager:
-            show_toast(tm.os_window_id, 'Меню Git — скоро')
+        from .git_menu import show_git_panel
+        show_git_panel(self)
 
     @ac('win', 'Focus the window running Claude Code in the current tab')
     def focus_claude(self) -> None:

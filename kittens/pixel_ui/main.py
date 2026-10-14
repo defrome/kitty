@@ -17,7 +17,7 @@ from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, NamedTuple
 
 from kitty.key_encoding import KeyEvent
-from kitty.titlebar import PALETTE, Canvas, icon_plus, icon_save
+from kitty.titlebar import PALETTE, Canvas, icon_git, icon_plus, icon_save
 from kitty.typing_compat import BossType
 
 from ..tui.handler import Handler, kitten_ui, result_handler
@@ -71,6 +71,8 @@ class View:
     width: float = 460
     title: str = ''
     centered = False  # vertically centered, rather than hanging from the top like a popover
+    anchor_right = False  # placed at the right, under the titlebar buttons, rather than in the middle
+    request_redraw: Callable[[], None] = lambda: None  # set by the host, safe to call from any thread
     avail: tuple[float, float] = (1000, 1000)  # the size of the window, in logical pixels, set before drawing
 
     def on_press(self, action: Any, x: float, y: float) -> bool:
@@ -602,7 +604,389 @@ class SettingsView(View):
     # }}}
 
 
-VIEWS: dict[str, Callable[[dict[str, Any]], View]] = {'workspaces': WorkspacesView, 'settings': SettingsView}
+class GitView(View):
+    title = 'Git'
+    anchor_right = True
+    width = 470
+    max_files = 6
+
+    def __init__(self, data: dict[str, Any]):
+        import threading
+
+        from . import git as G
+        self.G = G
+        self.cwd: str = data.get('cwd', '')
+        self.has_claude: bool = data.get('has_claude', False)
+        self.mode = 'claude' if self.has_claude else 'direct'
+        self.state = G.repo_state(self.cwd) if self.cwd else G.RepoState()
+        self.message = ''
+        self.message_state = 'generating'  # generating, ready, edited, failed
+        self.custom = ''
+        self.branch_name = ''
+        self.focus = 'custom'  # custom, message or branch, which field typing goes to
+        self.preview = ''  # a command written by Claude for a custom wish, shown for confirmation
+        self.preview_state = ''  # '', generating, ready, failed
+        self.error = ''
+        self.lock = threading.Lock()
+        if self.state.files:
+            self.generate_message()
+
+    # background work {{{
+    def in_thread(self, func: Callable[[], None]) -> None:
+        import threading
+        threading.Thread(target=func, daemon=True).start()
+
+    def generate_message(self) -> None:
+        self.message_state = 'generating'
+
+        def work() -> None:
+            try:
+                msg = self.G.generate_message(self.state)
+                ok = True
+            except Exception:
+                msg, ok = self.G.fallback_message(self.state), False
+            with self.lock:
+                if self.message_state == 'generating':
+                    self.message, self.message_state = msg, ('ready' if ok else 'failed')
+            self.request_redraw()
+
+        self.in_thread(work)
+
+    def generate_command(self, wish: str) -> None:
+        self.preview_state, self.preview = 'generating', ''
+
+        def work() -> None:
+            try:
+                cmd, st = self.G.generate_command(self.state, wish), 'ready'
+            except Exception as e:
+                cmd, st = str(e), 'failed'
+            with self.lock:
+                self.preview, self.preview_state = cmd, st
+            self.request_redraw()
+
+        self.in_thread(work)
+    # }}}
+
+    def state_key(self) -> Any:
+        return (self.mode, self.message, self.message_state, self.custom, self.branch_name, self.focus, self.preview, self.preview_state, self.error)
+
+    def files_shown(self) -> int:
+        return min(len(self.state.files), self.max_files)
+
+    def height(self) -> float:
+        if not self.state.is_repo:
+            return 170
+        h = 16 + 36 + 14  # header
+        h += 34 + max(1, self.files_shown()) * 28 + (24 if len(self.state.files) > self.max_files else 0) + 8 + 14  # changes
+        if self.state.files:
+            h += 22 + 40 + 14  # message
+        h += 36 + 6 + 22 + 14  # mode and its caption
+        h += 44 + 8 + 36 + 14  # buttons
+        h += 44  # custom field
+        if self.preview_state:
+            h += 10 + 92
+        if self.error:
+            h += 26
+        return h + 16
+
+    def draw(self, c: Canvas, hover: Any) -> list[Hit]:
+        hits: list[Hit] = []
+        W = self.width
+        st = self.state
+        close = Rect(W - 16 - 28, 18, 28, 28)
+        c.circle(close.x + 14, close.y + 14, 14, P.pressed if hover == 'close' else '#262833')
+        icon_close(c, close.x + 6, close.y + 6, P.text2)
+        hits.append((close, 'close'))
+        if not st.is_repo:
+            c.text(18, 32, 'Git', 15, '#ffffff', 'SemiBold')
+            c.text(18, 74, 'Эта папка не в git-репозитории:', 13, P.text2)
+            c.text(18, 94, c.fit_text(self.cwd, 12.5, W - 36), 12.5, P.muted)
+            b = Rect(16, 116, 150, 36)
+            c.rounded(b.x, b.y, b.w, b.h, 10, P.pressed if hover == 'init' else '#20222b', '#2c2e3a')
+            c.text(b.x + b.w / 2, b.y + b.h / 2, 'git init', 13, P.text, 'Medium', anchor='mm')
+            hits.append((b, 'init'))
+            return hits
+        # header
+        c.rounded(16, 16, 36, 36, 10, P.accent_bg)
+        icon_git(c, 26, 26, '#ff8cc6')
+        c.text(62, 26, c.fit_text(st.name, 15, W - 62 - 60 - 110, 'SemiBold'), 15, '#ffffff', 'SemiBold')
+        sub = f'ветка {st.branch}' if st.branch else 'нет ветки'
+        if st.ahead:
+            sub += f' · ↑{st.ahead} не отправлено'
+        if st.behind:
+            sub += f' · ↓{st.behind} на сервере'
+        if not st.upstream and st.branch:
+            sub += ' · не на сервере'
+        c.text(62, 44, c.fit_text(sub, 12.5, W - 62 - 60), 12.5, P.muted)
+        y = 66
+        # changes
+        n = len(st.files)
+        box_h = 34 + max(1, self.files_shown()) * 28 + (24 if n > self.max_files else 0) + 8
+        c.rounded(16, y, W - 32, box_h, 12, '#121319')
+        c.text(30, y + 18, f'ИЗМЕНЕНИЯ · {n}' if n else 'ИЗМЕНЕНИЙ НЕТ', 11, P.muted)
+        added = sum(max(0, f.added) for f in st.files)
+        deleted = sum(max(0, f.deleted) for f in st.files)
+        if added or deleted:
+            tx = W - 30
+            tx -= c.text(tx, y + 18, f'−{deleted}', 11.5, '#ff7a85', anchor='rm') + 8
+            c.text(tx, y + 18, f'+{added}', 11.5, P.green, anchor='rm')
+        ry = y + 34
+        colors = {'M': P.yellow, 'A': P.green, '?': P.green, 'D': '#ff7a85', 'R': P.cyan}
+        if not n:
+            c.text(30, ry + 14, 'Рабочая копия чистая' + (', можно отправить коммиты' if st.ahead else ''), 12.5, P.muted)
+        for f in st.files[:self.max_files]:
+            c.text(30, ry + 14, 'N' if f.status == '?' else f.status, 12, colors.get(f.status, P.text2), 'SemiBold')
+            right = W - 30
+            if f.deleted > 0:
+                right -= c.text(right, ry + 14, f'−{f.deleted}', 12, '#ff7a85', anchor='rm') + 8
+            if f.added > 0:
+                right -= c.text(right, ry + 14, f'+{f.added}', 12, P.green, anchor='rm') + 8
+            c.text(52, ry + 14, c.fit_text(f.path, 12.5, right - 52 - 8), 12.5, P.text)
+            ry += 28
+        if n > self.max_files:
+            c.text(52, ry + 10, f'и ещё {n - self.max_files}…', 12, P.muted)
+        y += box_h + 14
+        # commit message
+        if st.files:
+            c.text(18, y + 9, 'Сообщение коммита', 12, P.muted)
+            label = {'generating': 'Claude пишет…', 'ready': 'написал Claude · заново', 'edited': 'изменено · заново',
+                     'failed': 'без Claude · заново'}[self.message_state]
+            lw = c.text_width(label, 12) + 12
+            regen = Rect(W - 16 - lw, y - 2, lw, 22)
+            if hover == 'regenerate' and self.message_state != 'generating':
+                c.rounded(regen.x, regen.y, regen.w, regen.h, 6, P.hover)
+            c.text(regen.x + regen.w - 6, y + 9, label, 12, P.cyan_text if self.message_state != 'failed' else P.muted, anchor='rm')
+            hits.append((regen, 'regenerate'))
+            y += 22
+            field = Rect(16, y, W - 32, 40)
+            focused = self.focus == 'message'
+            c.rounded(field.x, field.y, field.w, field.h, 10, '#121319', P.accent if focused else '#2c2e3a')
+            text = self.message if self.message_state != 'generating' else ''
+            shown = c.fit_text(text, 13, field.w - 32) if text else ''
+            if shown:
+                c.text(field.x + 12, field.y + 20, shown, 13, P.text)
+            elif self.message_state == 'generating':
+                c.text(field.x + 12, field.y + 20, 'Claude читает изменения…', 13, P.muted)
+            if focused:
+                cx = field.x + 12 + (c.text_width(shown, 13) if shown else 0) + 2
+                c.line([(cx, field.y + 11), (cx, field.y + 29)], P.cyan, 1.5)
+            hits.append((field, 'focus_message'))
+            y += 40 + 14
+        # mode
+        seg = Rect(16, y, W - 32, 36)
+        c.rounded(seg.x, seg.y, seg.w, seg.h, 10, '#121319', '#23252e')
+        half = (seg.w - 6) / 2
+        for i, (mode, label) in enumerate((('claude', 'Через Claude'), ('direct', 'Напрямую в терминал'))):
+            r = Rect(seg.x + 3 + i * half, seg.y + 3, half, 30)
+            enabled = mode == 'direct' or self.has_claude
+            if self.mode == mode:
+                c.rounded(r.x, r.y, r.w, r.h, 8, '#2b2d38')
+            elif hover == ('mode', mode) and enabled:
+                c.rounded(r.x, r.y, r.w, r.h, 8, '#1c1e26')
+            color = '#ffffff' if self.mode == mode else (P.muted if enabled else '#4a4f5c')
+            c.text(r.x + r.w / 2, r.y + 15, label, 13, color, 'Medium' if self.mode == mode else 'Regular', anchor='mm')
+            if enabled:
+                hits.append((r, ('mode', mode)))
+        y += 36 + 6
+        caption = ('Задачу выполнит Claude из этой вкладки, проверив изменения.' if self.mode == 'claude' else
+                   ('Команды git выполнятся в терминале.' + ('' if self.has_claude else ' Claude в этой вкладке не запущен.')))
+        c.text(18, y + 9, c.fit_text(caption, 12, W - 36), 12, P.muted)
+        y += 22 + 14
+        # buttons
+        can_commit = bool(st.files) and bool(self.message.strip()) and self.message_state != 'generating'
+        if st.files:
+            primary_label, primary_action, primary_ok = 'Коммит и пуш', 'commit_push', can_commit or (self.mode == 'claude' and bool(st.files))
+        elif st.ahead:
+            primary_label, primary_action, primary_ok = f'Отправить {st.ahead} коммит' + ('а' if 2 <= st.ahead % 10 <= 4 and not 12 <= st.ahead % 100 <= 14 else ('' if st.ahead % 10 == 1 and st.ahead % 100 != 11 else 'ов')), 'push', True
+        else:
+            primary_label, primary_action, primary_ok = 'Нечего коммитить', '', False
+        b = Rect(16, y, W - 32, 44)
+        color = P.accent if primary_ok else '#3a2a33'
+        if primary_ok and hover == primary_action:
+            color = '#ff6fb6'
+        c.rounded(b.x, b.y, b.w, b.h, 12, color)
+        tw = c.text_width(primary_label, 14.5, 'SemiBold')
+        c.text(b.x + b.w / 2 - (40 if primary_action == 'commit_push' and primary_ok else 0), b.y + 22, primary_label, 14.5,
+               '#0b0c10' if primary_ok else '#7a6470', 'SemiBold', anchor='mm')
+        if primary_action == 'commit_push' and primary_ok:
+            c.text(b.x + b.w / 2 + tw / 2 - 14, b.y + 22, 'Ctrl+Enter', 12, '#5a1a3a', 'Medium', anchor='lm')
+        if primary_ok:
+            hits.append((b, primary_action))
+        y += 44 + 8
+        gap = 8
+        bw = (W - 32 - 2 * gap) / 3
+        for i, (action, label, ok) in enumerate((('commit', 'Только коммит', can_commit or (self.mode == 'claude' and bool(st.files))),
+                                                  ('pull', 'Pull', bool(st.upstream)), ('branch', 'Новая ветка', True))):
+            r = Rect(16 + i * (bw + gap), y, bw, 36)
+            active = action == 'branch' and self.focus == 'branch'
+            bg = '#2b2d38' if (ok and hover == action) or active else '#20222b'
+            c.rounded(r.x, r.y, r.w, r.h, 10, bg, P.accent if active else '#2c2e3a')
+            c.text(r.x + r.w / 2, r.y + 18, label, 13, P.text if ok else '#4a4f5c', 'Medium', anchor='mm')
+            if ok:
+                hits.append((r, action))
+        y += 36 + 14
+        # custom wish, or the name of the new branch
+        field = Rect(16, y, W - 32, 44)
+        is_branch = self.focus == 'branch'
+        focused = self.focus in ('custom', 'branch')
+        c.rounded(field.x, field.y, field.w, field.h, 12, '#121319', P.accent if focused else '#2c2e3a')
+        text = self.branch_name if is_branch else self.custom
+        placeholder = 'Имя новой ветки' if is_branch else 'Своё действие: открой PR в develop с описанием'
+        shown = c.fit_text(text, 13, field.w - 70) if text else ''
+        if shown:
+            c.text(field.x + 14, field.y + 22, shown, 13, P.text)
+        else:
+            c.text(field.x + 14 + 4, field.y + 22, c.fit_text(placeholder, 13, field.w - 76), 13, P.muted)
+        if focused:
+            cx = field.x + 14 + (c.text_width(shown, 13) if shown else 0) + 1
+            c.line([(cx, field.y + 12), (cx, field.y + 32)], P.cyan, 1.5)
+        send = Rect(field.x + field.w - 6 - 34, field.y + 5, 34, 34)
+        ok = bool(text.strip())
+        c.rounded(send.x, send.y, send.w, send.h, 9, (P.accent if ok and hover == 'submit' else '#3a3c48') if ok else '#24262f')
+        c.line([(send.x + 17, send.y + 24), (send.x + 17, send.y + 10)], '#ffffff' if ok else '#5a5e6c', 1.8)
+        c.line([(send.x + 12, send.y + 15), (send.x + 17, send.y + 10), (send.x + 22, send.y + 15)], '#ffffff' if ok else '#5a5e6c', 1.8)
+        hits.append((field, 'focus_custom' if not is_branch else 'focus_branch'))
+        if ok:
+            hits.append((send, 'submit'))
+        y += 44
+        # a command written by Claude for the custom wish
+        if self.preview_state:
+            y += 10
+            box = Rect(16, y, W - 32, 92)
+            c.rounded(box.x, box.y, box.w, box.h, 12, '#121319', '#2c2e3a')
+            if self.preview_state == 'generating':
+                c.text(box.x + 14, box.y + 24, 'Claude подбирает команду…', 12.5, P.muted)
+            elif self.preview_state == 'failed':
+                c.text(box.x + 14, box.y + 24, c.fit_text('Не получилось: ' + self.preview, 12.5, box.w - 28), 12.5, '#ff7a85')
+            else:
+                c.text(box.x + 14, box.y + 24, c.fit_text(self.preview, 12.5, box.w - 28), 12.5, P.text)
+                run = Rect(box.x + box.w - 14 - 110, box.y + 46, 110, 32)
+                ins = Rect(run.x - 8 - 170, box.y + 46, 170, 32)
+                c.rounded(run.x, run.y, run.w, run.h, 9, '#ff6fb6' if hover == 'run_preview' else P.accent)
+                c.text(run.x + run.w / 2, run.y + 16, 'Выполнить', 13, '#0b0c10', 'SemiBold', anchor='mm')
+                c.rounded(ins.x, ins.y, ins.w, ins.h, 9, '#2b2d38' if hover == 'insert_preview' else '#20222b', '#2c2e3a')
+                c.text(ins.x + ins.w / 2, ins.y + 16, 'Вставить в терминал', 13, P.text, 'Medium', anchor='mm')
+                hits += [(run, 'run_preview'), (ins, 'insert_preview')]
+            y += 92
+        if self.error:
+            c.text(18, y + 16, c.fit_text(self.error, 12, W - 36), 12, '#ff7a85')
+        return hits
+
+    # actions {{{
+    def result_for(self, action: str) -> dict[str, Any] | None:
+        G, st = self.G, self.state
+        msg = self.message.strip()
+        claude = self.mode == 'claude'
+        if action == 'init':
+            return {'action': 'run', 'commands': 'git init', 'cwd': self.cwd}
+        if action in ('commit_push', 'commit'):
+            push = action == 'commit_push'
+            if claude:
+                return {'action': 'claude', 'prompt': G.claude_commit_prompt(msg or 'на твоё усмотрение', push)}
+            if not msg:
+                self.error = 'Нужно сообщение коммита'
+                return None
+            return {'action': 'run', 'cwd': st.root, 'commands': G.commit_and_push_command(st, msg) if push else G.commit_command(msg)}
+        if action == 'push':
+            return {'action': 'claude', 'prompt': G.CLAUDE_PUSH_PROMPT} if claude else {'action': 'run', 'cwd': st.root, 'commands': G.push_command(st)}
+        if action == 'pull':
+            return {'action': 'claude', 'prompt': G.CLAUDE_PULL_PROMPT} if claude else {'action': 'run', 'cwd': st.root, 'commands': 'git pull'}
+        return None
+
+    def submit(self) -> dict[str, Any] | None:
+        if self.focus == 'branch':
+            name = self.branch_name.strip().replace(' ', '-')
+            if not name:
+                return None
+            if self.mode == 'claude':
+                return {'action': 'claude', 'prompt': self.G.claude_branch_prompt(name)}
+            return {'action': 'run', 'cwd': self.state.root, 'commands': self.G.new_branch_command(name)}
+        wish = self.custom.strip()
+        if not wish:
+            return None
+        if self.mode == 'claude':
+            return {'action': 'claude', 'prompt': wish}
+        self.generate_command(wish)
+        return None
+
+    def on_click(self, action: Any) -> dict[str, Any] | None:
+        self.error = ''
+        if action == 'close':
+            return {'action': 'cancel'}
+        if action == 'regenerate':
+            if self.message_state != 'generating':
+                self.generate_message()
+            return None
+        if action in ('focus_message', 'focus_custom', 'focus_branch'):
+            self.focus = action[len('focus_'):]
+            return None
+        if action == 'branch':
+            self.focus = 'custom' if self.focus == 'branch' else 'branch'
+            return None
+        if action == 'submit':
+            return self.submit()
+        if action == 'run_preview':
+            return {'action': 'run', 'cwd': self.state.root, 'commands': self.preview}
+        if action == 'insert_preview':
+            return {'action': 'insert', 'cwd': self.state.root, 'commands': self.preview}
+        if isinstance(action, tuple) and action[0] == 'mode':
+            self.mode = action[1]
+            return None
+        if isinstance(action, str):
+            return self.result_for(action)
+        return None
+
+    def on_text(self, text: str) -> dict[str, Any] | None:
+        self.error = ''
+        if self.focus == 'message':
+            with self.lock:
+                if self.message_state == 'generating':
+                    self.message = ''
+                self.message += text
+                self.message_state = 'edited'
+        elif self.focus == 'branch':
+            self.branch_name += text
+        else:
+            self.custom += text
+            self.preview_state = self.preview = ''
+        return None
+
+    def on_key(self, key: KeyEvent) -> dict[str, Any] | None:
+        if key.matches('ctrl+enter'):
+            return self.result_for('commit_push' if self.state.files else 'push')
+        if key.matches('enter'):
+            if self.focus == 'message':
+                return self.result_for('commit_push')
+            return self.submit()
+        if key.matches('tab'):
+            order = ['message', 'custom'] if self.state.files else ['custom']
+            self.focus = order[(order.index(self.focus) + 1) % len(order)] if self.focus in order else order[0]
+            return None
+        if key.matches('backspace') or key.matches('ctrl+backspace') or key.matches('ctrl+u'):
+            clear = not key.matches('backspace')
+            if self.focus == 'message':
+                with self.lock:
+                    self.message = '' if clear else self.message[:-1]
+                    self.message_state = 'edited'
+            elif self.focus == 'branch':
+                self.branch_name = '' if clear else self.branch_name[:-1]
+            else:
+                self.custom = '' if clear else self.custom[:-1]
+                self.preview_state = self.preview = ''
+        return None
+
+    def on_escape(self) -> bool:
+        if self.focus == 'branch':
+            self.focus = 'custom'
+            return True
+        if self.preview_state:
+            self.preview_state = self.preview = ''
+            return True
+        return False
+    # }}}
+
+
+VIEWS: dict[str, Callable[[dict[str, Any]], View]] = {'workspaces': WorkspacesView, 'settings': SettingsView, 'git': GitView}
 # }}}
 
 
@@ -653,6 +1037,7 @@ class PixelUI(Handler):
         self.view = view
         self.rc = RemoteControl(remote_control)
         self.dragging = False
+        view.request_redraw = self.request_redraw
         if isinstance(view, SettingsView):
             view.apply = self.apply_setting
         self.background_path = background
@@ -731,6 +1116,13 @@ class PixelUI(Handler):
         frame.alpha_composite(panel, (m, m))
         return frame, hits
 
+    def request_redraw(self) -> None:
+        ' Can be called from any thread, for instance when background work done by the view completes '
+        try:
+            self.asyncio_loop.call_soon_threadsafe(self.draw_panel)
+        except Exception:
+            pass
+
     def apply_setting(self, key: str, live: bool) -> None:
         ' Called by the settings view: live is True while a slider is being dragged '
         view = self.view
@@ -753,7 +1145,7 @@ class PixelUI(Handler):
         view.avail = (W / s, H / s)
         pw, ph = round(view.width * s), round(view.height() * s)
         m = self.margin_px = round(28 * s)
-        x0 = max(0, (W - pw) // 2)
+        x0 = max(0, W - pw - round(16 * s)) if view.anchor_right else max(0, (W - pw) // 2)
         y0 = max(0, (H - ph) // 2) if view.centered else round(10 * s)
         self.panel_rect = (x0, y0, pw, ph)
         self.panel_origin = (x0 - m, y0 - m)
