@@ -295,10 +295,17 @@ def icon_save(c: Canvas, x: float, y: float, color: str) -> None:
 
 
 def icon_gear(c: Canvas, x: float, y: float, color: str) -> None:
-    c.draw.ellipse((c.p(x + 5.6), c.p(y + 5.6), c.p(x + 10.4), c.p(y + 10.4)), outline=color, width=max(1, c.p(1.5)))
-    for (x1, y1), (x2, y2) in (((8, 1.8), (8, 3.8)), ((8, 12.2), (8, 14.2)), ((1.8, 8), (3.8, 8)), ((12.2, 8), (14.2, 8)),
-                               ((3.6, 3.6), (5, 5)), ((11, 11), (12.4, 12.4)), ((12.4, 3.6), (11, 5)), ((5, 11), (3.6, 12.4))):
-        c.line([(x + x1, y + y1), (x + x2, y + y2)], color)
+    # A cog: a disc with eight rectangular teeth and a hole in the middle
+    import math
+    cx, cy = x + 8, y + 8
+    r_body, r_tooth, half_w = 4.6, 6.6, 1.25
+    for i in range(8):
+        a = i * math.pi / 4
+        dx, dy, px, py = math.cos(a), math.sin(a), -math.sin(a), math.cos(a)
+        pts = [(cx + dx * r + px * w, cy + dy * r + py * w) for r, w in ((r_body - 0.5, -half_w), (r_tooth, -half_w), (r_tooth, half_w), (r_body - 0.5, half_w))]
+        c.draw.polygon([(c.p(px_), c.p(py_)) for px_, py_ in pts], fill=color)
+    # the body is a ring, so that the hole shows whatever is behind the icon
+    c.draw.ellipse((c.p(cx - r_body), c.p(cy - r_body), c.p(cx + r_body), c.p(cy + r_body)), outline=color, width=c.p(r_body - 2))
 
 
 def icon_chevron(c: Canvas, x: float, y: float, color: str) -> None:
