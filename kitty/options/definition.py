@@ -2200,6 +2200,17 @@ opt(
 )
 
 opt(
+    'tab_bar_sidebar',
+    'no',
+    option_type='to_bool',
+    long_text='''
+When the tab bar is on the left edge, draw it as a sidebar listing workspaces:
+the current workspace expanded to show its tabs, the others with their git
+branch and the state of Claude Code running in them.
+''',
+)
+
+opt(
     'tab_bar_margin_width',
     '0.0',
     option_type='positive_float',

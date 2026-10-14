@@ -1209,8 +1209,8 @@ class TabBar:
         self.tab_extents = ()
         s.cursor.x = s.cursor.y = 0
         s.erase_in_display(2, False)
-        if self.tab_bar_edge == LEFT_EDGE:
-            # On the left the tab bar is the sidebar listing workspaces
+        if self.tab_bar_edge == LEFT_EDGE and get_options().tab_bar_sidebar:
+            # The sidebar listing workspaces
             from .sidebar import render
             try:
                 self.tab_extents = render(self)
